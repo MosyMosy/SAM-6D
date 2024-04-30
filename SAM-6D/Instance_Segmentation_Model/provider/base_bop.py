@@ -10,10 +10,11 @@ from torch.utils.data import Dataset
 import os.path as osp
 import pandas as pd
 from utils.inout import load_json, save_json, casting_format_to_save_json
-from utils.poses.pose_utils import load_index_level_in_level2
+# from provider.poses.utils import load_index_level_in_level2
 import torch
 from utils.bbox_utils import CropResizePad
 import pytorch_lightning as pl
+import json
 
 pl.seed_everything(2023)
 
@@ -26,7 +27,7 @@ OBJ_IDS = {
     "itodd": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28],
     "hb": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33],
 }
-
+vis_ratio = 0.70
 
 class BaseBOP(Dataset):
     def __init__(
@@ -53,7 +54,7 @@ class BaseBOP(Dataset):
                     if os.path.isdir(osp.join(split_folder, scene))
                     and scene != "models"
                 ]
-            )
+            )       
         elif isinstance(split, list):
             self.list_scenes = []
             for scene in split:
@@ -97,6 +98,7 @@ class BaseBOP(Dataset):
             }
             logging.info(f"Loading metaData for split {split}")
             metaData_path = osp.join(self.root_dir, f"{split}_metaData.json")
+            scene_obj_list = []                ########## Added buy Ali
             if reset_metaData:
                 for scene_path in tqdm(self.list_scenes, desc="Loading metaData"):
                     scene_id = scene_path.split("/")[-1]
@@ -121,6 +123,15 @@ class BaseBOP(Dataset):
                         else:
                             video_metaData[json_name] = None
                     assert len(rgb_paths) > 0, f"{scene_path} is empty"
+                    ################## Object 5
+                    scene_gt_path = os.path.join(scene_path, "scene_gt.json")
+                    camera_gt_path = os.path.join(scene_path, "scene_camera.json")
+                    scene_info_path = os.path.join(scene_path, "scene_gt_info.json")
+                    with open(scene_gt_path) as scenes_f, open(camera_gt_path) as camera_f, open(scene_info_path) as scene_info_f:
+                        scenes_dic = json.load(scenes_f)
+                        cameras_dic = json.load(camera_f)
+                        scene_info_dic = json.load(scene_info_f)
+                    #####################################    
                     for idx_frame in range(len(rgb_paths)):
                         # get rgb path
                         rgb_path = rgb_paths[idx_frame]
@@ -129,7 +140,29 @@ class BaseBOP(Dataset):
                         depth_path = osp.join(
                             scene_path, "depth", f"{id_frame:06d}.png"
                         )
-                        if depth_path in depth_paths:
+                        ################## object 5
+                        
+                        obj_list = scenes_dic[f"{id_frame}"]
+                        for i, obj_dic in enumerate(obj_list):
+                            for obj_id in [5]:
+                                if (obj_dic["obj_id"] == obj_id):
+                                    # remove low visible items
+                                    if scene_info_dic[f"{id_frame}"][i]["visib_fract"] < vis_ratio:
+                                        continue                                                                                                             
+                                    scene_obj_list.append([scene_id, id_frame, obj_id])  
+                                    if depth_path in depth_paths:
+                                        metaData["depth_path"].append(depth_path)
+                                    else:
+                                        metaData["depth_path"].append(None)
+                                    metaData["scene_id"].append(scene_id)
+                                    metaData["frame_id"].append(id_frame)
+                                    metaData["rgb_path"].append(str(rgb_path))
+                                    metaData["intrinsic"].append(
+                                        video_metaData["scene_camera"][f"{id_frame}"]["cam_K"]
+                                    )
+                            ###########################
+
+                        """if depth_path in depth_paths:
                             metaData["depth_path"].append(depth_path)
                         else:
                             metaData["depth_path"].append(None)
@@ -138,7 +171,17 @@ class BaseBOP(Dataset):
                         metaData["rgb_path"].append(str(rgb_path))
                         metaData["intrinsic"].append(
                             video_metaData["scene_camera"][f"{id_frame}"]["cam_K"]
-                        )
+                        )"""
+                ########################## Object 5
+                """_, indexes, count = np.unique(np.array(scene_obj_list), axis=0, return_counts=True, return_index=True)
+                indexes = indexes[count == 1]
+                #self.selected_scenes = [self.selected_scenes[i] for i in indexes]
+                metaData["depth_path"] = [metaData["depth_path"][i] for i in indexes]
+                metaData["scene_id"] = [metaData["scene_id"] for i in indexes]
+                metaData["frame_id"] = [metaData["frame_id"] for i in indexes]
+                metaData["rgb_path"] = [metaData["rgb_path"] for i in indexes]
+                metaData["intrinsic"] = [metaData["intrinsic"] for i in indexes]"""
+                ###################################                
                 # casting format of metaData
                 metaData = casting_format_to_save_json(metaData)
                 save_json(metaData_path, metaData)

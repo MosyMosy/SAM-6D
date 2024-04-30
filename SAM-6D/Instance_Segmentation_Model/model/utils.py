@@ -7,6 +7,10 @@ from utils.inout import save_json, load_json, save_npz
 from utils.bbox_utils import xyxy_to_xywh, xywh_to_xyxy, force_binary_mask
 import time
 from PIL import Image
+import torch.nn.functional as F
+
+from pytorch3d.structures import Pointclouds, utils as py3d_util
+from pytorch3d.ops import knn_points
 
 lmo_object_ids = np.array(
     [
@@ -214,3 +218,89 @@ def convert_npz_to_json(idx, list_npz_paths):
         }
         results.append(result)
     return results
+
+
+# ----------------------------------------------------------------------------------
+def feature2pixel(features, target_size):
+    B, _, H, W = target_size
+    pixel_features = (
+        features.reshape(B, 16, 16, 4, 4, 64).permute(0, 5, 1, 3, 2, 4).contiguous()
+    )
+    pixel_features = pixel_features.reshape(B, -1, 64, 64)
+    pixel_features = F.interpolate(
+        pixel_features, (H, W), mode="bilinear", align_corners=False
+    )
+    return pixel_features
+
+
+def packed_to_padded(packed, lengths, pad_value=-1):
+    list = py3d_util.packed_to_list(packed, lengths.tolist())
+    return py3d_util.list_to_padded(list, pad_value=pad_value)
+
+
+def mean_distance_nearest_neighbor_torch(points):
+    # Use knn_points from PyTorch3D to find the nearest neighbors (k=2)
+    # We request 2 neighbors because the first one will be the point itself
+    knn_result = knn_points(points.unsqueeze(0), points.unsqueeze(0), K=2)
+
+    # Extract distances to the nearest neighbors
+    distances = knn_result.dists.squeeze(0)[:, 1]  # Skip the 0th neighbor (itself)
+
+    # Compute the maximum distance
+    max_distance = torch.mean(distances).item()
+
+    return max_distance
+
+def mean_distance_to_centroid(points):
+    
+    # Calculate the centroid
+    centroid = points.mean(dim=0)
+
+    # Calculate the distances from each point to the centroid
+    distances = torch.sqrt(torch.sum((points - centroid)**2, axis=1))
+    distances = distances / distances.max()
+    
+    # Calculate the mean distance
+    mean_distance = distances.mean()
+
+    return mean_distance
+
+def pc_normalize(pc):
+    centroid = np.mean(pc, axis=0)
+    pc = pc - centroid
+    m = np.max(np.sqrt(np.sum(pc**2, axis=1)))
+    pc = pc / m
+    return pc
+
+def average_features_to_refpoints(batch_points, feats, ref_points, threshold=None):
+    assert len(batch_points.shape) == 3
+    assert batch_points.shape[0] == feats.shape[0]
+    assert len(ref_points.shape) == 2
+    if threshold is None:
+        threshold = mean_distance_nearest_neighbor_torch(ref_points) * 2.5
+        threshold = mean_distance_to_centroid(ref_points) * 1e-5
+    ref_features = torch.zeros(
+        (ref_points.shape[0], feats.shape[-1]),
+        dtype=torch.float32,
+        device=ref_points.device,
+    )
+    ref_features_count = torch.zeros(
+        (ref_points.shape[0]),
+        dtype=torch.float32,
+        device=ref_points.device,
+    )
+    for i in range(len(batch_points)):
+        result = knn_points(batch_points[i].unsqueeze(0), ref_points.unsqueeze(0), K=1)
+        dists = result.dists.squeeze(0).squeeze(-1)
+        idx = result.idx.squeeze(0).squeeze(-1)
+        good_idx = (dists < threshold).nonzero().squeeze(-1)
+        # np.savetxt(f"tmp/pcl/near{i}.xyz", batch_points[i][good_idx].cpu().numpy())
+        filtered_knn_index = idx[good_idx]
+        ref_features[filtered_knn_index] += feats[i][good_idx]
+        ref_features_count[filtered_knn_index] += 1
+        
+    ref_features = ref_features / ref_features_count.unsqueeze(-1)
+    obj_points_feats = torch.cat([ref_points, ref_features], dim=-1)
+
+    return obj_points_feats
+

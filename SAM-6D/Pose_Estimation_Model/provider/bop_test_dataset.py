@@ -22,7 +22,7 @@ from bop_object_utils import load_objs
 
 
 class BOPTestset():
-    def __init__(self, cfg, eval_dataset_name='ycbv', detetion_path=None):
+    def __init__(self, cfg, eval_dataset_name='ycbv', detetion_path=None, obj_id=5):
         assert detetion_path is not None
 
         self.cfg = cfg
@@ -40,33 +40,55 @@ class BOPTestset():
                                             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                                 std=[0.229, 0.224, 0.225])])
 
-        if eval_dataset_name == 'tless':
-            model_path = 'models_cad'
-        else:
-            model_path = 'models'
+        # if eval_dataset_name == 'tless':
+        #     model_path = 'models_cad'
+        # else:
+        #     model_path = 'models'
+        model_path = 'models'
         self.template_folder = os.path.join(cfg.template_dir, eval_dataset_name)
 
-        self.data_folder = os.path.join(self.data_dir, eval_dataset_name, 'test')
+        # self.data_folder = os.path.join(self.data_dir, eval_dataset_name, 'test')
+        self.data_folder = os.path.join(self.data_dir, eval_dataset_name, 'test_primesense')
         self.model_folder = os.path.join(self.data_dir, eval_dataset_name, model_path)
-        obj, obj_ids = load_objs(self.model_folder, self.template_folder, sample_num=self.n_sample_model_point, n_template_view=self.n_template_view)
+        # Moslem: I have added the obj_id to the following line and the init method
+        obj, obj_ids = load_objs(self.model_folder, self.template_folder, sample_num=self.n_sample_model_point, n_template_view=self.n_template_view, obj_id=obj_id)
         obj_idxs = {obj_id: idx for idx, obj_id in enumerate(obj_ids)}
         self.objects = obj
         self.obj_idxs = obj_idxs
-
+        
         with open(detetion_path) as f:
             dets = json.load(f) # keys: scene_id, image_id, category_id, bbox, score, segmentation
-
+        
+        # a list of all scene-image keys in the detection results.
         self.det_keys = []
+        # a dictionary of scene-images (key) and their detections as a list of all dethections
+        # in that scene-image. 
         self.dets = {}
         for det in tqdm(dets, 'processing detection results'):
+            if int(det['category_id']) not in obj_ids:
+                continue
             scene_id = det['scene_id'] # data type: int
             img_id = det['image_id'] # data type: int
             key = str(scene_id).zfill(6) + '_' + str(img_id).zfill(6)
-            if key not in self.det_keys:
+            if key not in self.det_keys:                    
                 self.det_keys.append(key)
                 self.dets[key] = []
             self.dets[key].append(det)
-        del dets
+            # # Moslem: clean the detection results if we have the obj_id
+            # if obj_id is not None:  
+            #     if (det['score']>self.seg_filter_score) and (self.get_instance(det) is not None):              
+            #         if key not in self.det_keys:                    
+            #             self.det_keys.append(key)
+            #             self.dets[key] = []
+            #         self.dets[key].append(det)
+            #     else:
+            #         tqdm.write("Dropped detection")
+            # else:
+            #     if key not in self.det_keys:
+            #         self.det_keys.append(key)
+            #         self.dets[key] = []
+            #     self.dets[key].append(det)
+        del dets            
         print('testing on {} images on {}...'.format(len(self.det_keys), eval_dataset_name))
 
     def __len__(self):
@@ -81,7 +103,24 @@ class BOPTestset():
                 instance = self.get_instance(det)
                 if instance is not None:
                     instances.append(instance)
-
+        if len(instances) == 0:
+            print('No instance in the scene-image: ', self.det_keys[index])
+            # Moslem: if there is no instance, assign it an empty dictionary
+            ret_dict = {}
+            ret_dict['pts'] = torch.zeros((2048, 3))
+            ret_dict['rgb'] = torch.zeros((3, self.img_size, self.img_size))
+            ret_dict['rgb_choose'] = torch.zeros((2048,)).long()
+            ret_dict['obj'] = torch.IntTensor([self.obj_idxs[det['category_id']]]).long()
+            ret_dict['model'] = torch.zeros((self.n_sample_model_point, 3))
+            ret_dict['obj_id'] = torch.IntTensor([det['category_id']])
+            ret_dict['score'] = torch.tensor([0.0])
+            instances.append(ret_dict)
+        if len(instances) > 1:
+            # print('More than one instance in the scene-image: ', self.det_keys[index])
+            # Moslem: if there is more than one instance, take the one with the highest score
+            instances = sorted(instances, key=lambda x: x['score'], reverse=True)
+            instances = [instances[0]]
+        
         ret_dict = {}
         for key in instances[0].keys():
             ret_dict[key] = torch.stack([instance[key] for instance in instances])

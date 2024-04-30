@@ -1,0 +1,1 @@
+python test_bop.py --gpus 3 --model pose_estimation_model --config config/base.yaml --checkpoint_path checkpoints/sam-6d-pem-base.pth --dataset tless --view 42  --det_name fastsam_new --obj_id 5

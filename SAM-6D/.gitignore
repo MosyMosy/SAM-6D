@@ -1,0 +1,6 @@
+**/log/
+**/Data/
+
+**/checkpoints/
+
+**/__pycache__/

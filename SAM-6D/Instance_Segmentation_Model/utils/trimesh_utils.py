@@ -104,6 +104,22 @@ def depth_image_to_pointcloud_translate_torch(depth, scale, K):
 
     return translate
 
+def depth_image_to_pointcloud(depth, scale, K):
+    u = torch.arange(0, depth.shape[2])
+    v = torch.arange(0, depth.shape[1])
+
+    u, v = torch.meshgrid(u, v, indexing="xy")
+    u = u.to(depth.device)
+    v = v.to(depth.device)
+
+    # depth metric is mm, depth_scale metric is m
+    # K metric is m
+    Z = depth * scale / 1000
+    X = (u - K[0, 2]) * Z / K[0, 0]
+    Y = (v - K[1, 2]) * Z / K[1, 1]
+    
+    xyz = torch.stack((X, Y, Z), dim=-1)
+    return xyz
 
 if __name__ == "__main__":
     mesh_path = (

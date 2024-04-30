@@ -6,7 +6,7 @@ from hydra.utils import instantiate
 from torch.utils.data import DataLoader
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="run_inference")
+@hydra.main(version_base=None, config_path="/export/livia/home/vision/Myazdanpanah/projects/SAM-6D/SAM-6D/Instance_Segmentation_Model/configs", config_name="run_inference")
 def run_inference(cfg: DictConfig):
     OmegaConf.set_struct(cfg, False)
     hydra_cfg = hydra.core.hydra_config.HydraConfig.get()

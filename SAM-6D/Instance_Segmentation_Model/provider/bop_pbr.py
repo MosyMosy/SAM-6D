@@ -1,3 +1,8 @@
+import sys
+
+# sys.path.insert(0,'/export/livia/home/vision/Myazdanpanah/projects/SAM-6D/SAM-6D/Instance_Segmentation_Model/')
+
+
 import logging, os
 import os.path as osp
 from tqdm import tqdm
@@ -17,12 +22,14 @@ from utils.poses.pose_utils import (
     farthest_sampling,
     combine_R_and_T,
 )
+from utils.trimesh_utils import depth_image_to_pointcloud
 import torch
 from utils.bbox_utils import CropResizePad
 import pytorch_lightning as pl
 from functools import partial
 import multiprocessing
 from provider.bop import BaseBOP
+from pytorch3d.transforms import Rotate, Translate
 
 
 class BOPTemplatePBR(BaseBOP):
@@ -71,6 +78,14 @@ class BOPTemplatePBR(BaseBOP):
                 T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ]
         )
+        self.inv_rgb_transform = T.Compose(
+            [
+                T.Normalize(
+                    mean=[-0.485 / 0.229, -0.456 / 0.224, -0.406 / 0.225],
+                    std=[1 / 0.229, 1 / 0.224, 1 / 0.225],
+                ),
+            ]
+        )
         self.proposal_processor = CropResizePad(self.processing_config.image_size)
 
     def __len__(self):
@@ -82,6 +97,9 @@ class BOPTemplatePBR(BaseBOP):
             "scene_id": [],
             "frame_id": [],
             "rgb_path": [],
+            "depth_path": [],
+            "camera_K": [],
+            "depth_scale": [],
             "visib_fract": [],
             "obj_id": [],
             "idx_obj": [],
@@ -96,12 +114,14 @@ class BOPTemplatePBR(BaseBOP):
                     rgb_paths = sorted(Path(scene_path).glob("rgb/*.[pj][pn][g]"))
                 else:
                     rgb_paths = sorted(Path(scene_path).glob("gray/*.tif"))
-
+                depth_paths = sorted(Path(scene_path).glob("depth/*.[pj][pn][g]"))
                 # load poses
                 scene_gt_info = load_json(osp.join(scene_path, "scene_gt_info.json"))
                 scene_gt = load_json(osp.join(scene_path, "scene_gt.json"))
+                scene_camera = load_json(osp.join(scene_path, "scene_camera.json"))
                 for idx_frame in range(len(rgb_paths)):
                     rgb_path = rgb_paths[idx_frame]
+                    depth_path = depth_paths[idx_frame]
                     frame_id = int(str(rgb_path).split("/")[-1].split(".")[0])
                     obj_ids = [int(x["obj_id"]) for x in scene_gt[f"{frame_id}"]]
                     obj_poses = np.array(
@@ -110,9 +130,15 @@ class BOPTemplatePBR(BaseBOP):
                             for x in scene_gt[f"{frame_id}"]
                         ]
                     )
+
                     visib_fracts = [
                         float(x["visib_fract"]) for x in scene_gt_info[f"{frame_id}"]
                     ]
+
+                    camera_K = np.array(scene_camera[f"{frame_id}"]["cam_K"]).reshape(
+                        3, 3
+                    )
+                    depth_scale = scene_camera[f"{frame_id}"]["depth_scale"]
 
                     # add to metaData
                     metaData["visib_fract"].extend(visib_fracts)
@@ -123,6 +149,9 @@ class BOPTemplatePBR(BaseBOP):
                     metaData["scene_id"].extend([scene_id] * len(obj_ids))
                     metaData["frame_id"].extend([frame_id] * len(obj_ids))
                     metaData["rgb_path"].extend([str(rgb_path)] * len(obj_ids))
+                    metaData["depth_path"].extend([str(depth_path)] * len(obj_ids))
+                    metaData["camera_K"].extend([camera_K] * len(obj_ids))
+                    metaData["depth_scale"].extend([depth_scale] * len(obj_ids))
 
                     if idx_frame > self.max_num_frames:
                         break
@@ -182,9 +211,10 @@ class BOPTemplatePBR(BaseBOP):
                 obj_poses = np.array(obj_poses).reshape(-1, 4, 4)
                 distance = np.linalg.norm(obj_poses[:, :3, 3], axis=1, keepdims=True)
                 # print(distance[:10], distance.shape)
-                obj_poses[:, :3, 3] = obj_poses[:, :3, 3] / distance
+                obj_poses_normal = obj_poses.copy()
+                obj_poses_normal[:, :3, 3] = obj_poses[:, :3, 3] / distance
 
-                idx_keep = finder.search_nearest_query(obj_poses)
+                idx_keep = finder.search_nearest_query(obj_poses_normal)
                 # update metaData
                 selected_index.extend(selected_index_obj[idx_keep])
             self.metaData = self.metaData.iloc[selected_index]
@@ -198,7 +228,7 @@ class BOPTemplatePBR(BaseBOP):
             self.metaData = pd.read_csv(metaData_path).reset_index(drop=True)
 
     def __getitem__(self, idx):
-        templates, masks, boxes = [], [], []
+        templates, xyzs, masks, boxes, obj_template_poses = [], [], [], [], []
         obj_ids = []
         idx_range = range(
             idx * len(self.template_poses),
@@ -218,33 +248,68 @@ class BOPTemplatePBR(BaseBOP):
                 "mask_visib",
                 f"{frame_id:06d}_{idx_obj:06d}.png",
             )
+
+            depth_path = self.metaData.iloc[i].depth_path
             rgb = Image.open(rgb_path)
             mask = Image.open(mask_path)
+            depth = Image.open(depth_path)
             masked_rgb = Image.composite(
                 rgb, Image.new("RGB", rgb.size, (0, 0, 0)), mask
             )
+
             boxes.append(mask.getbbox())
             image = torch.from_numpy(np.array(masked_rgb.convert("RGB")) / 255).float()
-            templates.append(image)
             mask = torch.from_numpy(np.array(mask) / 255).float()
+            depth = torch.from_numpy(np.array(depth).astype(float))
+            # depth = depth * mask !!!!!!!! We should mask the point clouds after the proposal_processor
+            xyz = depth_image_to_pointcloud(
+                depth.unsqueeze(0),
+                self.metaData.iloc[i].depth_scale,
+                torch.from_numpy(self.metaData.iloc[i].camera_K),
+            )[0]
+
+            templates.append(image)
+            xyzs.append(xyz)
             masks.append(mask.unsqueeze(-1))
+            obj_template_poses.append(self.metaData.iloc[i].obj_poses)
 
         assert (
             len(np.unique(obj_ids)) == 1
         ), f"Only support one object per batch but found {np.unique(obj_ids)}"
 
         templates = torch.stack(templates).permute(0, 3, 1, 2)
+        xyzs = torch.stack(xyzs).permute(0, 3, 1, 2)
         masks = torch.stack(masks).permute(0, 3, 1, 2)
         boxes = torch.tensor(np.array(boxes))
+        obj_template_poses = torch.tensor(obj_template_poses)
+        obj_template_R = obj_template_poses[:, :3, :3]
+        obj_template_T = obj_template_poses[:, :3, 3] / 1000 # convert to meters
+
         templates_croped = self.proposal_processor(images=templates, boxes=boxes)
+        xyzs_cropped = self.proposal_processor(images=xyzs, boxes=boxes)
+        # a = xyzs_cropped.permute(0,2,3,1)[0]
+        # a = a[a[:,:,2] > 0]
+        # np.savetxt('tmp/pcl/scaled.xyz', a.numpy())
         masks_cropped = self.proposal_processor(images=masks, boxes=boxes)
+
         return {
             "templates": self.rgb_transform(templates_croped),
+            "xyzs": xyzs_cropped,
             "template_masks": masks_cropped[:, 0, :, :],
-            }
+            "obj_template_R": obj_template_R,
+            "obj_template_T": obj_template_T,
+        }
+
 
 
 if __name__ == "__main__":
+    import sys
+
+    sys.path.insert(
+        0,
+        "/export/livia/home/vision/Myazdanpanah/projects/SAM-6D/SAM-6D/Instance_Segmentation_Model/",
+    )
+
     logging.basicConfig(level=logging.INFO)
     from omegaconf import DictConfig, OmegaConf
     from torchvision.utils import make_grid, save_image
@@ -263,8 +328,9 @@ if __name__ == "__main__":
         ]
     )
     dataset = BOPTemplatePBR(
-        root_dir="/gpfsscratch/rech/tvi/uyb58rn/datasets/bop23_challenge/datasets/lmo",
-        template_dir="/gpfsscratch/rech/tvi/uyb58rn/datasets/bop23_challenge/datasets/templates_pyrender/lmo",
+        root_dir="/export/livia/home/vision/Myazdanpanah/projects/SAM-6D/SAM-6D/Data/BOP/tless",
+        template_dir="/export/livia/home/vision/Myazdanpanah/projects/SAM-6D/SAM-6D/Data/BOP/templates_pyrender/tless",
+        template_raw_dir="",
         obj_ids=None,
         level_templates=1,
         pose_distribution="all",
@@ -275,4 +341,4 @@ if __name__ == "__main__":
     for idx in tqdm(range(len(dataset))):
         sample = dataset[idx]
         sample["templates"] = inv_rgb_transform(sample["templates"])
-        save_image(sample["templates"], f"./tmp/lm_{idx}.png", nrow=7)
+        save_image(sample["templates"], f"./tmp/tless_{idx}.png", nrow=7)

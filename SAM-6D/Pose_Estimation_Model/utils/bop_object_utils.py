@@ -95,14 +95,21 @@ def load_objs(
         template_path='render_imgs',
         sample_num=512,
         n_template_view=0,
-        show_progressbar=True
+        show_progressbar=True,
+        obj_id = None
 ):
     objs = []
-    obj_ids = sorted([int(p.split('/')[-1][4:10]) for p in glob.glob(os.path.join(model_path, '*.ply'))])
+    if obj_id is not None:
+        obj_ids = [obj_id]
+    else:
+        obj_ids = sorted([int(p.split('/')[-1][4:10]) for p in glob.glob(os.path.join(model_path, '*.ply'))])
 
     if n_template_view>0:
-        template_paths = sorted(glob.glob(os.path.join(template_path, '*')))
-        assert len(template_paths) == len(obj_ids), '{} template_paths, {} obj_ids'.format(len(template_paths), len(obj_ids))
+        if obj_id is not None:
+            template_paths = [os.path.join(template_path, f"obj_{str(obj_id).zfill(6)}")]
+        else:
+            template_paths = sorted(glob.glob(os.path.join(template_path, '*')))
+            assert len(template_paths) == len(obj_ids), '{} template_paths, {} obj_ids'.format(len(template_paths), len(obj_ids))
     else:
         template_paths = [None for _ in range(len(obj_ids))]
 

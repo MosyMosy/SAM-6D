@@ -91,6 +91,7 @@ class BaseBOPTest(BaseBOP):
         **kwargs,
     ):
         self.root_dir = root_dir
+        print(self.root_dir)
         self.split = split
         self.load_list_scene(split=split)
         self.load_metaData(reset_metaData=True)
