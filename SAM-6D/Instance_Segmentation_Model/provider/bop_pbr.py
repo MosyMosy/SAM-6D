@@ -22,7 +22,7 @@ from utils.poses.pose_utils import (
     farthest_sampling,
     combine_R_and_T,
 )
-from utils.trimesh_utils import depth_image_to_pointcloud
+from model.utils import depth_image_to_pointcloud, depth_image_to_pointcloud_old
 import torch
 from utils.bbox_utils import CropResizePad
 import pytorch_lightning as pl
@@ -30,6 +30,8 @@ from functools import partial
 import multiprocessing
 from provider.bop import BaseBOP
 from pytorch3d.transforms import Rotate, Translate
+import imageio.v2 as imageio
+
 
 
 class BOPTemplatePBR(BaseBOP):
@@ -252,7 +254,8 @@ class BOPTemplatePBR(BaseBOP):
             depth_path = self.metaData.iloc[i].depth_path
             rgb = Image.open(rgb_path)
             mask = Image.open(mask_path)
-            depth = Image.open(depth_path)
+            depth = imageio.imread(depth_path)
+            # depth = Image.open(depth_path)
             masked_rgb = Image.composite(
                 rgb, Image.new("RGB", rgb.size, (0, 0, 0)), mask
             )
@@ -262,10 +265,12 @@ class BOPTemplatePBR(BaseBOP):
             mask = torch.from_numpy(np.array(mask) / 255).float()
             depth = torch.from_numpy(np.array(depth).astype(float))
             # depth = depth * mask !!!!!!!! We should mask the point clouds after the proposal_processor
+            if i == 187:
+                print(depth.shape)
             xyz = depth_image_to_pointcloud(
-                depth.unsqueeze(0),
-                self.metaData.iloc[i].depth_scale,
-                torch.from_numpy(self.metaData.iloc[i].camera_K),
+                (depth * mask).unsqueeze(0),
+                torch.tensor(self.metaData.iloc[i].depth_scale, dtype=torch.float32, device=depth.device).unsqueeze(0),
+                torch.from_numpy(self.metaData.iloc[i].camera_K).unsqueeze(0),
             )[0]
 
             templates.append(image)
@@ -296,6 +301,7 @@ class BOPTemplatePBR(BaseBOP):
             "templates": self.rgb_transform(templates_croped),
             "xyzs": xyzs_cropped,
             "template_masks": masks_cropped[:, 0, :, :],
+            "template_masks_uncropped": masks[:, 0, :, :],
             "obj_template_R": obj_template_R,
             "obj_template_T": obj_template_T,
         }

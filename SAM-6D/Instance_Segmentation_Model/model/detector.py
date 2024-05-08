@@ -30,7 +30,9 @@ from model.utils import (
     convert_npz_to_json,
     feature2pixel,
     packed_to_padded,
-    average_features_to_refpoints,
+    mask_outliers_by_reference,
+    filter_and_sample_point_cloud,
+    clean_point_average_features_to_refpoints,
 )
 from pytorch3d.ops import sample_farthest_points, box3d_overlap
 from pytorch3d.structures import Pointclouds
@@ -579,159 +581,6 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
         )
         logging.info(f"Init CNOS done!")
 
-    def set_reference_objects(self):
-        """
-        Sets the reference objects by computing and loading descriptors and appearance descriptors.
-
-        This method initializes the reference objects by computing descriptors and appearance descriptors
-        for each template in the reference dataset. The computed descriptors are then saved for future use.
-
-        If descriptors and appearance descriptors are already computed and saved, they are loaded from the disk.
-        Shape of descriptors: (N_objects, N_templates, 1024)
-        Shape of appearance descriptors: (N_objects, N_templates, 256, 1024)
-
-        Returns:
-            None
-        """
-        os.makedirs(
-            osp.join(self.log_dir, f"predictions/{self.dataset_name}"), exist_ok=True
-        )
-        logging.info("Initializing reference objects ...")
-
-        start_time = time.time()
-        self.ref_data = {
-            "descriptors": BatchedData(None),
-            "appe_descriptors": BatchedData(None),
-            "templates_points": BatchedData(None),
-        }
-        descriptors_path = osp.join(self.ref_dataset.template_dir, "descriptors.pth")
-        appe_descriptors_path = osp.join(
-            self.ref_dataset.template_dir, "descriptors_appe.pth"
-        )
-        templates_points_path = osp.join(
-            self.ref_dataset.template_dir, "templates_points.pth"
-        )
-
-        # Loading main descriptors
-        if self.onboarding_config.rendering_type == "pbr":
-            descriptors_path = descriptors_path.replace(".pth", "_pbr.pth")
-            appe_descriptors_path = appe_descriptors_path.replace(".pth", "_pbr.pth")
-            templates_points_path = templates_points_path.replace(".pth", "_pbr.pth")
-        if (
-            os.path.exists(descriptors_path)
-            and not self.onboarding_config.reset_descriptors
-        ):
-            self.ref_data["descriptors"] = torch.load(descriptors_path).to(self.device)
-        else:
-            for idx in tqdm(
-                range(len(self.ref_dataset)),
-                desc="Computing descriptors ...",
-            ):
-                ref_imgs = self.ref_dataset[idx]["templates"].to(self.device)
-                feats = self.descriptor_model.compute_features(
-                    ref_imgs, token_name="x_norm_clstoken"
-                )
-                self.ref_data["descriptors"].append(feats)
-
-            self.ref_data["descriptors"].stack()  # N_objects x descriptor_size
-            self.ref_data["descriptors"] = self.ref_data["descriptors"].data
-
-            # save the precomputed features for future use
-            torch.save(self.ref_data["descriptors"], descriptors_path)
-
-        # Loading appearance descriptors
-        if (
-            os.path.exists(appe_descriptors_path)
-            and not self.onboarding_config.reset_descriptors
-        ):
-            self.ref_data["appe_descriptors"] = torch.load(appe_descriptors_path).to(
-                self.device
-            )
-        else:
-            for idx in tqdm(
-                range(len(self.ref_dataset)),
-                desc="Computing appearance descriptors ...",
-            ):
-                ref_imgs = self.ref_dataset[idx]["templates"].to(self.device)
-                ref_masks = self.ref_dataset[idx]["template_masks"].to(self.device)
-                feats = self.descriptor_model.compute_masked_patch_feature(
-                    ref_imgs, ref_masks
-                )
-                self.ref_data["appe_descriptors"].append(feats)
-
-            self.ref_data["appe_descriptors"].stack()
-            self.ref_data["appe_descriptors"] = self.ref_data["appe_descriptors"].data
-
-            # save the precomputed features for future use
-            torch.save(self.ref_data["appe_descriptors"], appe_descriptors_path)
-
-        # Loading main templates_points
-        if (
-            os.path.exists(templates_points_path)
-            and not self.onboarding_config.reset_descriptors
-        ):
-            self.ref_data["templates_points"] = torch.load(templates_points_path).to(
-                self.device
-            )
-        else:
-            for idx in tqdm(
-                range(len(self.ref_dataset)),
-                desc="Computing templates_points ...",
-            ):
-                xyzs = self.ref_dataset[idx]["xyzs"].to(self.device)
-                feats = self.ref_data["appe_descriptors"][idx]
-                ref_masks = self.ref_dataset[idx]["template_masks"].to(self.device)
-                target_size = self.ref_dataset[idx]["templates"].size()
-                templates_R = self.ref_dataset[idx]["obj_template_R"].to(self.device)
-                templates_T = self.ref_dataset[idx]["obj_template_T"].to(self.device)
-
-                feats = feature2pixel(feats, target_size)
-                xyzs = xyzs.permute(0, 2, 3, 1)  # B x H x W x 3
-                feats = feats.permute(0, 2, 3, 1)  # B x H x W x C
-                mask_filter = ref_masks == 1
-                xyzs = xyzs * mask_filter.unsqueeze(-1)
-                filter = xyzs[:, :, :, 2] > 0
-                lengths = (filter > 0).sum(dim=[1, 2])
-                xyzs = packed_to_padded(xyzs[filter], lengths)
-                feats = packed_to_padded(feats[filter], lengths)
-                # padded FPS
-                sample_ind = sample_farthest_points(
-                    xyzs,
-                    lengths=lengths,
-                    K=self.onboarding_config.template_point_size,
-                )[1]
-
-                xyzs = xyzs[torch.arange(xyzs.shape[0]).unsqueeze(-1), sample_ind]
-                feats = feats[
-                    torch.arange(feats.shape[0]).unsqueeze(-1),
-                    sample_ind,
-                ]
-
-                transform = transform3d.Translate(templates_T)
-                xyzs = transform.inverse().transform_points(xyzs)
-                transform = transform3d.Rotate(templates_R)
-                xyzs = transform.inverse().transform_points(xyzs)
-                # np.savetxt('tmp/pcl/processed.xyz', ref_xyzs[0].cpu().numpy())
-                xyzs = torch.cat([xyzs, feats], dim=-1)
-
-                self.ref_data["templates_points"].append(xyzs.to(torch.float32))
-
-            self.ref_data["templates_points"].stack()  # N_objects x descriptor_size
-            # center the template's pointclouds
-            # self.ref_data["templates_points"] -= self.ref_data["templates_points"].mean(
-            #     dim=2, keepdim=True
-            # )
-            self.ref_data["templates_points"] = self.ref_data["templates_points"].data
-
-            # save the precomputed features for future use
-            torch.save(self.ref_data["templates_points"], templates_points_path)
-
-        end_time = time.time()
-        logging.info(
-            f"Runtime: {end_time-start_time:.02f}s, Descriptors shape: {self.ref_data['descriptors'].shape}, \
-                Appearance descriptors shape: {self.ref_data['appe_descriptors'].shape}"
-        )
-
     def set_semantic_features(self):
         logging.info("Initializing semantic_features ...")
         start_time = time.time()
@@ -816,21 +665,39 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
 
         self.ref_data["template_points_feats"] = BatchedData(None)
         self.ref_data["obj_points_feats"] = BatchedData(None)
+        self.ref_data["obj_template_R"] = BatchedData(None)
+        self.ref_data["obj_template_T"] = BatchedData(None)
+        self.ref_data["obj_template_mask"] = BatchedData(None)
         template_points_feats_path = osp.join(
             self.ref_dataset.template_dir, "template_points_feats.pth"
         )
         obj_points_feats_path = osp.join(
             self.ref_dataset.template_dir, "obj_points_feats.pth"
         )
+        obj_template_R_path = osp.join(
+            self.ref_dataset.template_dir, "obj_template_R.pth"
+        )
+        obj_template_T_path = osp.join(
+            self.ref_dataset.template_dir, "obj_template_T.pth"
+        )
+        obj_template_mask_path = osp.join(
+            self.ref_dataset.template_dir, "obj_template_mask.pth"
+        )
         if self.onboarding_config.rendering_type == "pbr":
             template_points_feats_path = template_points_feats_path.replace(
                 ".pth", "_pbr.pth"
             )
             obj_points_feats_path = obj_points_feats_path.replace(".pth", "_pbr.pth")
+            obj_template_R_path = obj_template_R_path.replace(".pth", "_pbr.pth")
+            obj_template_T_path = obj_template_T_path.replace(".pth", "_pbr.pth")
+            obj_template_mask_path = obj_template_mask_path.replace(".pth", "_pbr.pth")
 
         if (
             os.path.exists(template_points_feats_path)
             and os.path.exists(obj_points_feats_path)
+            and os.path.exists(obj_template_R_path)
+            and os.path.exists(obj_template_T_path)
+            and os.path.exists(obj_template_mask_path)
             and not self.onboarding_config.reset_descriptors
         ):
             self.ref_data["template_points_feats"] = torch.load(
@@ -839,61 +706,85 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
             self.ref_data["obj_points_feats"] = torch.load(obj_points_feats_path).to(
                 self.device
             )
+            self.ref_data["obj_template_R"] = torch.load(obj_template_R_path).to(
+                self.device
+            )
+            self.ref_data["obj_template_T"] = torch.load(obj_template_T_path).to(
+                self.device
+            )
+            self.ref_data["obj_template_mask"] = torch.load(obj_template_mask_path).to(
+                self.device
+            )
         else:
             for idx in tqdm(
                 range(len(self.ref_dataset)),
                 desc="Computing template_points_feats ...",
             ):
-                xyzs = self.ref_dataset[idx]["xyzs"].to(self.device)
+                template_info = self.ref_dataset[idx]
+                xyzs = template_info["xyzs"].to(self.device)
                 feats = self.ref_data["appe_descriptors"][idx]
-                ref_masks = self.ref_dataset[idx]["template_masks"].to(self.device)
-                target_size = self.ref_dataset[idx]["templates"].size()
-                templates_R = self.ref_dataset[idx]["obj_template_R"].to(self.device)
-                templates_T = self.ref_dataset[idx]["obj_template_T"].to(self.device)
-                ref_pointcloud = self.ref_data["pointcloud"][idx]
+                ref_masks = template_info["template_masks"].to(self.device)
+                uncropped_masks = template_info["template_masks_uncropped"].to(
+                    self.device
+                )
+                target_size = template_info["templates"].size()
+                templates_R = template_info["obj_template_R"].to(self.device)
+                templates_T = template_info["obj_template_T"].to(self.device)
+                ref_pointcloud = self.ref_data["pointcloud"][idx].to(torch.float32)
 
+                B, C, H, W = xyzs.shape
                 feats = feature2pixel(feats, target_size)
-                xyzs = xyzs.permute(0, 2, 3, 1)  # B x H x W x 3
-                feats = feats.permute(0, 2, 3, 1)  # B x H x W x C
-                mask_filter = ref_masks == 1
-                xyzs = xyzs * mask_filter.unsqueeze(-1)
-                filter = xyzs[:, :, :, 2] > 0
-                lengths = (filter > 0).sum(dim=[1, 2])
-                xyzs = packed_to_padded(xyzs[filter], lengths)
-                feats = packed_to_padded(feats[filter], lengths)
-                # padded FPS
-                sample_ind = sample_farthest_points(
-                    xyzs,
-                    lengths=lengths,
-                    K=self.onboarding_config.template_point_size,
-                )[1]
+                xyzs = torch.cat([xyzs, feats], dim=1)
+                xyzs = xyzs.permute(0, 2, 3, 1).view(
+                    B, H * W, -1
+                )  # B , H x W , (3 + C)
 
-                xyzs = xyzs[torch.arange(xyzs.shape[0]).unsqueeze(-1), sample_ind]
-                feats = feats[
-                    torch.arange(feats.shape[0]).unsqueeze(-1),
-                    sample_ind,
-                ]
-
-                template_points_feats = torch.cat(
-                    [xyzs - xyzs.mean(dim=1, keepdim=True), feats], dim=-1
+                # feats = feats.permute(0, 2, 3, 1)  # B x H x W x C
+                wrong_feature_mask = (
+                    torch.norm(xyzs[:, :, 3:], dim=-1, keepdim=True).squeeze(-1) != 0
                 )
-                self.ref_data["template_points_feats"].append(
-                    template_points_feats.to(torch.float32)
-                )
-
+                # transform the template points to the object coordinate system
                 transform = (
                     transform3d.Translate(templates_T).inverse().rotate(templates_R)
                 )
-                xyzs = transform.transform_points(xyzs.to(torch.float32)).to(
-                    torch.float32
+                xyzs = torch.cat(
+                    [
+                        transform.transform_points(xyzs[:, :, :3].to(torch.float32)),
+                        xyzs[:, :, 3:],
+                    ],
+                    dim=-1,
+                ).to(torch.float32)
+
+                # As we have zero features in the masked apperance features, we need to filter them out
+                # These regions are in the border of the mask from masked patchs.
+                wrong_depth_mask = ref_masks.view(B, H * W) == 1
+
+                # cleaning the templates points by the reference pointcloud
+                outlier_points_mask = mask_outliers_by_reference(
+                    ref_pointcloud.unsqueeze(0).repeat(xyzs.shape[0], 1, 1), xyzs
+                )
+                final_mask = wrong_feature_mask & wrong_depth_mask & outlier_points_mask
+                xyzs = filter_and_sample_point_cloud(
+                    xyzs,
+                    final_mask.unsqueeze(-1),
+                    self.onboarding_config.template_point_size,
+                    filter_bad_depth=False,
                 )
 
-                obj_points_feats = average_features_to_refpoints(
-                    xyzs, feats, ref_pointcloud
+                self.ref_data["template_points_feats"].append(xyzs)
+
+                obj_points_feats = clean_point_average_features_to_refpoints(
+                    xyzs,
+                    ref_pointcloud,
+                    self.onboarding_config.template_obj_point_size,
                 )
                 self.ref_data["obj_points_feats"].append(
                     obj_points_feats.to(torch.float32)
                 )
+
+                self.ref_data["obj_template_R"].append(templates_R)
+                self.ref_data["obj_template_T"].append(templates_T)
+                self.ref_data["obj_template_mask"].append(uncropped_masks)
                 # for i in range(42):
                 # np.savetxt(f'tmp/pcl/new{i}.xyz', xyzs[i].cpu().numpy())
 
@@ -907,11 +798,25 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
 
             self.ref_data["obj_points_feats"].stack()
             self.ref_data["obj_points_feats"] = self.ref_data["obj_points_feats"].data
+
+            self.ref_data["obj_template_R"].stack()
+            self.ref_data["obj_template_R"] = self.ref_data["obj_template_R"].data
+
+            self.ref_data["obj_template_T"].stack()
+            self.ref_data["obj_template_T"] = self.ref_data["obj_template_T"].data
+
+            self.ref_data["obj_template_mask"].stack()
+            self.ref_data["obj_template_mask"] = self.ref_data["obj_template_mask"].data
+
             # save the precomputed features for future use
             torch.save(
                 self.ref_data["template_points_feats"], template_points_feats_path
             )
             torch.save(self.ref_data["obj_points_feats"], obj_points_feats_path)
+
+            torch.save(self.ref_data["obj_template_R"], obj_template_R_path)
+            torch.save(self.ref_data["obj_template_T"], obj_template_T_path)
+            torch.save(self.ref_data["obj_template_mask"], obj_template_mask_path)
 
         end_time = time.time()
         logging.info(
@@ -1016,7 +921,9 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
         getting the bbox of projected pointcloud from the image.
         """
 
-        pose_R = self.ref_data["poses"][best_pose, 0:3, 0:3]  # N_query x 3 x 3
+        # pose_R = self.ref_data["poses"][best_pose, 0:3, 0:3]  # N_query x 3 x 3
+        # based on the real pose of the best template
+        pose_R = self.ref_data["obj_template_R"][pred_object_idx, best_pose].to(torch.float32)  # N_query x 3 x 3
         select_pc = self.ref_data["pointcloud"][
             pred_object_idx, ...
         ]  # N_query x N_pointcloud x 3
@@ -1197,14 +1104,39 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
         edge3 = corners[:, 4] - corners[:, 0]  # Vector from corner 0 to 4
 
         # Calculate the cross product of edge1 and edge2
-        cross_product = torch.cross(edge1, edge2, dim=1)  # Ensure correct dimension for cross product
+        cross_product = torch.cross(
+            edge1, edge2, dim=1
+        )  # Ensure correct dimension for cross product
 
         # Calculate the dot product to find the volume
-        volume = torch.abs(torch.einsum('bi,bi->b', cross_product, edge3))
+        volume = torch.abs(torch.einsum("bi,bi->b", cross_product, edge3))
 
         return volume
 
     def compute_geometric_score(
+        self,
+        image_uv,
+        proposals,
+        appe_descriptors,
+        ref_aux_descriptor,
+        visible_thred=0.5,
+    ):
+
+        aux_metric = MaskedPatch_MatrixSimilarity(metric="cosine", chunk_size=64)
+        visible_ratio = aux_metric.compute_visible_ratio(
+            appe_descriptors, ref_aux_descriptor, visible_thred
+        )
+
+        # IoU calculation
+        y1x1 = torch.min(image_uv, dim=1).values
+        y2x2 = torch.max(image_uv, dim=1).values
+        xyxy = torch.concatenate((y1x1, y2x2), dim=-1)
+
+        iou = compute_iou(xyxy, proposals.boxes)
+
+        return iou, visible_ratio
+
+    def compute_3D_geometric_score(
         self,
         batch,
         best_template_idx,
@@ -1262,15 +1194,17 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
         bad_corners = lengths == 0
         depth_thresh = 1e-6
         bad_corners = bad_corners * self.batch_box_volume(xyzs_corners) < depth_thresh
-        xyzs_corners[bad_corners] = box_corner_vertices        
-        intersection_vol, iou_3d = box3d_overlap(templates_corners, xyzs_corners, eps=depth_thresh)
+        xyzs_corners[bad_corners] = box_corner_vertices
+        intersection_vol, iou_3d = box3d_overlap(
+            templates_corners, xyzs_corners, eps=depth_thresh
+        )
         # IoU calculation
         # y1x1 = torch.min(image_uv, dim=1).values
         # y2x2 = torch.max(image_uv, dim=1).values
         # xyxy = torch.concatenate((y1x1, y2x2), dim=-1)
         # iou = compute_iou(xyxy, proposals.boxes)
         iou_3d = torch.diag(iou_3d)
-        iou_3d[bad_corners] = 0.
+        iou_3d[bad_corners] = 0.0
         return iou_3d, visible_ratio
 
     def test_step(self, batch, idx):
@@ -1337,16 +1271,32 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
         # image_uv = self.project_template_to_image(
         #     best_template, pred_idx_objects, batch, detections.masks
         # )
-        detections.masks = detections.masks[:,0]
-        geometric_score, visible_ratio = self.compute_geometric_score(
-            batch,
-            best_template,
-            pred_idx_objects,
-            detections,
-            query_appe_descriptors,
-            ref_aux_descriptor,
-            visible_thred=self.visible_thred,
-        )
+        detections.masks = detections.masks[:, 0]
+        
+        if self.onboarding_config.geometric_score == "3D":
+            geometric_score, visible_ratio = self.compute_3D_geometric_score(
+                batch,
+                best_template,
+                pred_idx_objects,
+                detections,
+                query_appe_descriptors,
+                ref_aux_descriptor,
+                visible_thred=self.visible_thred,
+            )
+        elif self.onboarding_config.geometric_score == "projection":
+            image_uv = self.project_template_to_image(
+                best_template, pred_idx_objects, batch, detections.masks
+            )
+            geometric_score, visible_ratio = self.compute_geometric_score(
+                image_uv,
+                detections,
+                query_appe_descriptors,
+                ref_aux_descriptor,
+                visible_thred=self.visible_thred,
+            )
+        else:
+            raise NotImplementedError
+
 
         # final score
         final_score = (
