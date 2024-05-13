@@ -194,6 +194,41 @@ def force_binary_mask(mask, threshold=0.):
 def get_bbox_area(bbox):
     return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
 
+def mask_iou(
+    mask1: torch.Tensor,
+    mask2: torch.Tensor,
+) -> torch.Tensor:
+
+    """
+    Inputs:
+    mask1: BxNxHxW torch.float32. Consists of [0, 1]
+    mask2: BxMxHxW torch.float32. Consists of [0, 1]
+    Outputs:
+    ret: BxNxM torch.float32. Consists of [0 - 1]
+    """
+    mask1 = mask1.permute(0, 3, 1, 2)
+    mask2 = mask2.permute(0, 3, 1, 2)
+    B, N, H, W = mask1.shape
+    B, M, H, W = mask2.shape
+
+    mask1 = mask1.view(B, N, H * W)
+    mask2 = mask2.view(B, M, H * W)
+
+    intersection = torch.matmul(mask1, mask2.swapaxes(1, 2))
+
+    area1 = mask1.sum(dim=2).unsqueeze(1)
+    area2 = mask2.sum(dim=2).unsqueeze(1)
+
+    union = (area1.swapaxes(1, 2) + area2) - intersection
+
+    iou = torch.where(
+        union == 0,
+        torch.tensor(0.0, device=mask1.device),
+        intersection / union,
+    )
+    average_iou = iou.mean(dim=[1, 2]).view(B)
+    return average_iou
+
 def compute_iou(bb_a, bb_b):
     """Calculates the Intersection over Union (IoU) of two 2D bounding boxes.
 

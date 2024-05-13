@@ -30,4 +30,4 @@ onboarding_config:
   level_templates: 0 # 0 is coarse, 1 is medium, 2 is dense
   template_point_size: 1024
   template_obj_point_size: 4096
-  geometric_score: "projection" # projection, 3D, or 2D
+  geometric_score: "2D" # projection, 3D, or 2D

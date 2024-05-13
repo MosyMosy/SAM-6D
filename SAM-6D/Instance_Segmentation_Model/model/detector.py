@@ -22,7 +22,7 @@ from utils.trimesh_utils import (
     depth_image_to_pointcloud,
 )
 from utils.poses.pose_utils import get_obj_poses_from_template_level
-from utils.bbox_utils import xyxy_to_xywh, compute_iou
+from utils.bbox_utils import xyxy_to_xywh, compute_iou, mask_iou
 from pytorch3d.transforms import transform3d
 from model.utils import (
     BatchedData,
@@ -1207,6 +1207,28 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
         iou_3d[bad_corners] = 0.0
         return iou_3d, visible_ratio
 
+    def compute_2D_geometric_score(
+        self,
+        best_template_idx,
+        pred_objects_idx,
+        proposals,
+        appe_descriptors,
+        ref_aux_descriptor,
+        visible_thred=0.5,
+    ):
+        aux_metric = MaskedPatch_MatrixSimilarity(metric="cosine", chunk_size=64)
+        visible_ratio = aux_metric.compute_visible_ratio(
+            appe_descriptors, ref_aux_descriptor, visible_thred
+        )        
+        templates_mask = self.ref_data["obj_template_mask"][
+            pred_objects_idx, best_template_idx
+        ]
+        mask = proposals.masks
+        mask = mask > 0.5
+        iou_2d = mask_iou(templates_mask.unsqueeze(-1), mask.to(torch.float32).unsqueeze(-1))
+        
+        return iou_2d, visible_ratio
+
     def test_step(self, batch, idx):
         if idx == 0:
             os.makedirs(
@@ -1294,8 +1316,15 @@ class Instance_Segmentation_Model_geo3d(pl.LightningModule):
                 ref_aux_descriptor,
                 visible_thred=self.visible_thred,
             )
-        else:
-            raise NotImplementedError
+        elif self.onboarding_config.geometric_score == "2D":
+            geometric_score, visible_ratio = self.compute_2D_geometric_score(
+                best_template,
+                pred_idx_objects,
+                detections,
+                query_appe_descriptors,
+                ref_aux_descriptor,
+                visible_thred=self.visible_thred,
+            )
 
 
         # final score

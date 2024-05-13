@@ -57,7 +57,7 @@ def get_parser():
         "--obj_id", type=int, default=5, help="view number of templates"
     )
     parser.add_argument(
-        "--det_name", type=str, default="Ali_5_all_dinoSmall", help="det_path"
+        "--det_name", type=str, default="fastsam_20240512_obj5_all_geo2D", help="det_path"
     )
     args_cfg = parser.parse_args()
 
