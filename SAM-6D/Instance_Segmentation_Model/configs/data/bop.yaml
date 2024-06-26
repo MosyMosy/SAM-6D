@@ -13,17 +13,18 @@ reference_dataloader:
     max_num_scenes: 10 # config for reference frames selection
     max_num_frames: 500
     min_visib_fract: 0.8
-    num_references: 200 
+    num_references: 200
     use_visible_mask: True
 
 query_dataloader:
-  _target_: provider.bop.BaseBOPTest
+  _target_: provider.bop.BaseBOPTest #BaseBOPTest_single_obj
   root_dir: ${machine.root_dir}/BOP/
   split:
   reset_metaData: True
+  target_obj_ids: [5]
   processing_config:
     image_size: ${model.descriptor_model.image_size}
-    
+
 train_datasets:
   megapose-gso:
     identifier: bop23_datasets/megapose-gso/gso_models.json
@@ -36,7 +37,7 @@ train_datasets:
     prefix: bop23_datasets/megapose-shapenet/train_pbr_web
     shard_ids: [0, 1039]
 
-datasets: 
+datasets:
   lm:
     cad: lm_models.zip
     test: lm_test_bop19.zip
@@ -61,11 +62,11 @@ datasets:
     cad: hb_models.zip
     test: hb_test_primesense_bop19.zip
     pbr_train: hb_train_pbr.zip
-    obj_names: [001_red_teddy, 002_bench_wise, 003_car, 004_white_cow, 005_white_pig, 006_white_cup, 007_driller, 008_green_rabbit, 009_holepuncher, 010_brown_unknown, 011_brown_unknown, 012_black_unknown, 013_black_unknown, 014_white_painter, 015_small_unkown, 016_small_unkown, 017_small_unkown, 018_cake_box, 019_minion, 020_colored_dog, 021_phone, 022_animal, 023_yellow_dog, 024_cassette_player, 025_red_racing_car, 026_motobike,  027_heels, 028_dinosaur, 029_tea_box, 030_animal, 031_japanese_toy, 032_white_racing_car, 033_yellow_rabbit]
+    obj_names: [001_red_teddy, 002_bench_wise, 003_car, 004_white_cow, 005_white_pig, 006_white_cup, 007_driller, 008_green_rabbit, 009_holepuncher, 010_brown_unknown, 011_brown_unknown, 012_black_unknown, 013_black_unknown, 014_white_painter, 015_small_unkown, 016_small_unkown, 017_small_unkown, 018_cake_box, 019_minion, 020_colored_dog, 021_phone, 022_animal, 023_yellow_dog, 024_cassette_player, 025_red_racing_car, 026_motobike, 027_heels, 028_dinosaur, 029_tea_box, 030_animal, 031_japanese_toy, 032_white_racing_car, 033_yellow_rabbit]
   hope:
     cad: hope_models.zip
     test: hope_test_bop19.zip
-    obj_names: [001_alphabet_soup, 002_bbq_sauce, 003_butter, 004_cherries, 005_chocolate_pudding, 006_cookies, 007_corn, 008_cream_cheese, 009_granola_bar, 010_green_bean, 011_tomato_sauce, 012_macaroni_cheese, 013_mayo, 014_milk, 015_mushroom, 016_mustard, 017_orange_juice, 018_parmesa_cheese, 019_peaches, 020_peaches_and_carrot, 021_pineapple, 022_popcorn, 023_raisins, 024_ranch_dressing, 025_spaghetti, 026_tomato_sauce,  027_tuna, 028_yogurt]
+    obj_names: [001_alphabet_soup, 002_bbq_sauce, 003_butter, 004_cherries, 005_chocolate_pudding, 006_cookies, 007_corn, 008_cream_cheese, 009_granola_bar, 010_green_bean, 011_tomato_sauce, 012_macaroni_cheese, 013_mayo, 014_milk, 015_mushroom, 016_mustard, 017_orange_juice, 018_parmesa_cheese, 019_peaches, 020_peaches_and_carrot, 021_pineapple, 022_popcorn, 023_raisins, 024_ranch_dressing, 025_spaghetti, 026_tomato_sauce, 027_tuna, 028_yogurt]
   ycbv:
     cad: ycbv_models.zip
     test: ycbv_test_bop19.zip

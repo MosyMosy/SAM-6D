@@ -25,7 +25,7 @@ detetion_paths = {
     "tudl": "../Instance_Segmentation_Model/log/sam/result_tudl.json",
     "tless": "../Instance_Segmentation_Model/log/{0}/result_tless.json",  # fastsam
     "lmo": "../Instance_Segmentation_Model/log/sam/result_lmo.json",
-    "itodd": "../Instance_Segmentation_Model/log/sam/result_itodd.json",
+    "itodd": "../Instance_Segmentation_Model/log/{0}/result_itodd.json",
     "icbin": "../Instance_Segmentation_Model/log/sam/result_icbin.json",
     "hb": "../Instance_Segmentation_Model/log/sam/result_hb.json",
 }
@@ -41,7 +41,7 @@ def get_parser():
     parser.add_argument(
         "--config", type=str, default="config/base.yaml", help="path to config file"
     )
-    parser.add_argument("--dataset", type=str, default="tless", help="")
+    parser.add_argument("--dataset", type=str, default="itodd", help="")
     parser.add_argument(
         "--checkpoint_path",
         type=str,
@@ -57,7 +57,7 @@ def get_parser():
         "--obj_id", type=int, default=5, help="view number of templates"
     )
     parser.add_argument(
-        "--det_name", type=str, default="fastsam_20240512_obj5_all_geo2D", help="det_path"
+        "--det_name", type=str, default="fastsam_itodd_base", help="det_path"
     )
     args_cfg = parser.parse_args()
 
@@ -98,9 +98,14 @@ def test(model, cfg, save_path, dataset_name, detetion_path):
 
     # build dataloader
     dataset = importlib.import_module(cfg.test_dataset.name)
-    dataset = dataset.BOPTestset(
-        cfg.test_dataset, dataset_name, detetion_path, obj_id=cfg.obj_id
-    )
+    if cfg.test_dataset.is_single_obj == True:
+        dataset = dataset.BOPTestset_single_obj(
+            cfg.test_dataset, dataset_name, detetion_path, obj_id=cfg.obj_id
+        )
+    else:
+        dataset = dataset.BOPTestset(
+            cfg.test_dataset, dataset_name, detetion_path
+        )
     dataloder = torch.utils.data.DataLoader(
         dataset,
         batch_size=1,

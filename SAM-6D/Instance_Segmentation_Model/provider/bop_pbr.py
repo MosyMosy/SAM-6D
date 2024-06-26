@@ -212,7 +212,6 @@ class BOPTemplatePBR(BaseBOP):
                 # normalize translation to have unit norm
                 obj_poses = np.array(obj_poses).reshape(-1, 4, 4)
                 distance = np.linalg.norm(obj_poses[:, :3, 3], axis=1, keepdims=True)
-                # print(distance[:10], distance.shape)
                 obj_poses_normal = obj_poses.copy()
                 obj_poses_normal[:, :3, 3] = obj_poses[:, :3, 3] / distance
 
@@ -265,8 +264,6 @@ class BOPTemplatePBR(BaseBOP):
             mask = torch.from_numpy(np.array(mask) / 255).float()
             depth = torch.from_numpy(np.array(depth).astype(float))
             # depth = depth * mask !!!!!!!! We should mask the point clouds after the proposal_processor
-            if i == 187:
-                print(depth.shape)
             xyz = depth_image_to_pointcloud(
                 (depth * mask).unsqueeze(0),
                 torch.tensor(self.metaData.iloc[i].depth_scale, dtype=torch.float32, device=depth.device).unsqueeze(0),
@@ -286,7 +283,7 @@ class BOPTemplatePBR(BaseBOP):
         xyzs = torch.stack(xyzs).permute(0, 3, 1, 2)
         masks = torch.stack(masks).permute(0, 3, 1, 2)
         boxes = torch.tensor(np.array(boxes))
-        obj_template_poses = torch.tensor(obj_template_poses)
+        obj_template_poses = torch.tensor(np.array(obj_template_poses))
         obj_template_R = obj_template_poses[:, :3, :3]
         obj_template_T = obj_template_poses[:, :3, 3] / 1000 # convert to meters
 

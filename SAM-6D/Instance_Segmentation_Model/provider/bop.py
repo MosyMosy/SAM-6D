@@ -12,7 +12,7 @@ from utils.poses.pose_utils import load_index_level_in_level2
 import torch
 from utils.bbox_utils import CropResizePad
 import pytorch_lightning as pl
-from provider.base_bop import BaseBOP
+from provider.base_bop import BaseBOP, BaseBOP_single_obj
 import imageio.v2 as imageio
 from utils.inout import load_json
 
@@ -95,6 +95,66 @@ class BaseBOPTest(BaseBOP):
         self.split = split
         self.load_list_scene(split=split)
         self.load_metaData(reset_metaData=True)
+        # shuffle metadata
+        self.metaData = self.metaData.sample(frac=1, random_state=2021).reset_index()
+        self.camemra_params = {}
+        for scenes in self.list_scenes:
+            scenes_id = scenes.split("/")[-1]
+            self.camemra_params.setdefault(scenes_id, load_json(osp.join(scenes, "scene_camera.json")))
+        self.rgb_transform = T.Compose(
+            [
+                T.ToTensor(),
+                T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ]
+        )
+
+    def load_depth_img(self, idx):
+        depth_path = self.metaData.iloc[idx]["depth_path"]
+        if depth_path is None:
+            if self.root_dir.split("/")[-1] == "itodd":
+                depth_path = self.metaData.iloc[idx]["rgb_path"].replace("gray", "depth")
+            else:
+                depth_path = self.metaData.iloc[idx]["rgb_path"].replace("rgb", "depth")
+          
+        try:
+            depth = np.array(imageio.imread(depth_path))
+        except:
+            raise Exception(depth_path)
+        return depth
+
+    def __getitem__(self, idx):
+        rgb_path = self.metaData.iloc[idx]["rgb_path"]
+        scene_id = self.metaData.iloc[idx]["scene_id"]
+        frame_id = self.metaData.iloc[idx]["frame_id"]
+        cam_intrinsic = self.metaData.iloc[idx]["intrinsic"]
+        image = Image.open(rgb_path)
+        image = self.rgb_transform(image.convert("RGB"))
+        depth = self.load_depth_img(idx)
+        cam_intrinsic = np.array(cam_intrinsic).reshape((3, 3))
+        depth_scale = self.camemra_params[scene_id][f"{frame_id}"]["depth_scale"]
+
+        return dict(
+            image=image,
+            scene_id=scene_id,
+            frame_id=frame_id,
+            depth=depth.astype(np.int32),
+            cam_intrinsic=cam_intrinsic,
+            depth_scale=depth_scale,
+        )
+        
+        
+class BaseBOPTest_single_obj(BaseBOP_single_obj):
+    def __init__(
+        self,
+        root_dir,
+        split,
+        **kwargs,
+    ):
+        self.root_dir = root_dir
+        print(self.root_dir)
+        self.split = split
+        self.load_list_scene(split=split)
+        self.load_metaData(reset_metaData=True, target_obj_ids = kwargs["target_obj_ids"])
         # shuffle metadata
         self.metaData = self.metaData.sample(frac=1, random_state=2021).reset_index()
         self.camemra_params = {}
